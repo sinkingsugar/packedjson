@@ -103,12 +103,30 @@ proc beginContainer(buf: var seq[byte]; k: JsonNodeKind) =
 proc endContainer(buf: var seq[byte]) = buf.add byte(opcodeEnd)
 
 type
+  JsonStorage = ref seq[byte]
   JsonNode* = object
     k: JsonNodeKind
     a, b: int
-    t: ref seq[byte]
+    t: JsonStorage
 
   JsonTree* = distinct JsonNode ## a JsonTree is a JsonNode that can be mutated.
+
+  JsonContext = object
+    cache: seq[owned(JsonStorage)]
+
+var mainContext {.threadvar.}: JsonContext
+
+proc purgeJsonCache*() =
+  when defined nimV2:
+    while mainContext.cache.len > 0:
+      dispose(mainContext.cache.pop())
+  else:
+    mainContext.cache.setLen(0)
+
+proc newStorage(): JsonStorage =
+  var storage = new JsonStorage
+  result = unown storage
+  mainContext.cache.add(storage)
 
 converter toJsonNode*(x: JsonTree): JsonNode {.inline.} = JsonNode(x)
 
@@ -117,7 +135,7 @@ proc newJNull*(): JsonNode =
   result.k = JNull
 
 template newBody(kind, x) =
-  new(result.t)
+  result.t = newStorage()
   result.t[] = @[]
   storeAtom(result.t[], kind, x)
   result.a = 0
@@ -139,7 +157,7 @@ proc newJFloat*(n: float): JsonNode =
 proc newJBool*(b: bool): JsonNode =
   ## Creates a new `JBool JsonNode`.
   result.k = JBool
-  new(result.t)
+  result.t = newStorage()
   result.t[] = @[if b: byte(opcodeTrue) else: byte(opcodeFalse)]
   result.a = 0
   result.b = high(result.t[])
@@ -147,7 +165,7 @@ proc newJBool*(b: bool): JsonNode =
 proc newJObject*(): JsonTree =
   ## Creates a new `JObject JsonNode`
   JsonNode(result).k = JObject
-  new(JsonNode(result).t)
+  JsonNode(result).t = newStorage()
   JsonNode(result).t[] = @[byte opcodeObject, byte opcodeEnd]
   JsonNode(result).a = 0
   JsonNode(result).b = high(JsonNode(result).t[])
@@ -155,7 +173,7 @@ proc newJObject*(): JsonTree =
 proc newJArray*(): JsonTree =
   ## Creates a new `JArray JsonNode`
   JsonNode(result).k = JArray
-  new(JsonNode(result).t)
+  JsonNode(result).t = newStorage()
   JsonNode(result).t[] = @[byte opcodeArray, byte opcodeEnd]
   JsonNode(result).a = 0
   JsonNode(result).b = high(JsonNode(result).t[])
@@ -539,7 +557,7 @@ proc copy*(n: JsonNode): JsonTree =
   JsonNode(result).a = n.a
   JsonNode(result).b = n.b
   if n.t != nil:
-    new(JsonNode(result).t)
+    JsonNode(result).t = newStorage()
     JsonNode(result).t[] = n.t[]
 
 proc getStr*(n: JsonNode, default: string = ""): string =
@@ -901,7 +919,7 @@ proc parseJson*(s: Stream, filename: string = ""): JsonTree =
   ## If `s` contains extra data, it will raise `JsonParsingError`.
   var p: JsonParser
   p.open(s, filename)
-  new JsonNode(result).t
+  JsonNode(result).t = newStorage()
   JsonNode(result).t[] = newSeqOfCap[byte](64)
   try:
     discard getTok(p) # read first token
@@ -1030,3 +1048,6 @@ when isMainModule:
     doAssert msg["less"].getBiggestInt == low(BiggestInt)
     doAssert msg["more"].getBiggestInt == high(BiggestInt)
     doAssert msg["million"].getBiggestInt == 1_000_000
+  
+  echo "Done"
+  # Expect dangling..
